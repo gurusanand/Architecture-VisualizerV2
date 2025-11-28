@@ -1,0 +1,541 @@
+{
+  "api_gateway": {
+    "databases": [
+      "Redis"
+    ],
+    "functions": [
+      "_setup_middleware() - Configures middleware stack",
+      "security_middleware() - Adds security headers, mTLS",
+      "request_id_middleware() - Generates unique request ID"
+    ],
+    "redis_ops": [
+      "ZREMRANGEBYSCORE ratelimit:{key} 0 {window_start}",
+      "ZCARD ratelimit:{key}",
+      "ZADD ratelimit:{key} {timestamp} {request_id}"
+    ],
+    "api_calls": [],
+    "deployment_type": "Container (Kubernetes)",
+    "replicas": 3,
+    "inbound_protocol": "HTTPS/REST",
+    "outbound_protocol": "HTTP/REST",
+    "container_image": "acr.azurecr.io/api-gateway:v1.0"
+  },
+  "authentication": {
+    "databases": [
+      "Redis"
+    ],
+    "functions": [
+      "validate_azure_token(token) - Validates Azure AD JWT",
+      "generate_jwt(user_data) - Creates internal JWT",
+      "decode_token(token) - Decodes and validates JWT"
+    ],
+    "redis_ops": [
+      "HSET session:{session_id} user_id token created_at",
+      "EXPIRE session:{session_id} 1800"
+    ],
+    "api_calls": [
+      "POST https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
+    ],
+    "deployment_type": "Managed Service (Azure AD)",
+    "replicas": "N/A",
+    "inbound_protocol": "HTTPS",
+    "outbound_protocol": "-"
+  },
+  "planner": {
+    "databases": [
+      "MongoDB",
+      "Redis"
+    ],
+    "functions": [
+      "_planner_node(state) - Analyzes request and creates plan"
+    ],
+    "mongodb_ops": [
+      "memory_episodes.find({user_id}).sort({timestamp: -1}).limit(10)"
+    ],
+    "redis_ops": [
+      "HGETALL memory:{user_id}:*"
+    ],
+    "api_calls": [
+      "POST /openai/deployments/gpt-4/chat/completions"
+    ],
+    "deployment_type": "Container (Kubernetes)",
+    "replicas": 2,
+    "inbound_protocol": "HTTP/REST",
+    "outbound_protocol": "HTTP/REST, gRPC",
+    "container_image": "acr.azurecr.io/planner-agent:v1.0"
+  },
+  "tool_selector": {
+    "databases": [
+      "MongoDB",
+      "Redis"
+    ],
+    "functions": [
+      "_tool_selector_node(state) - Selects appropriate MCP tools"
+    ],
+    "mongodb_ops": [
+      "mcp_tools.find({is_enabled: true})"
+    ],
+    "redis_ops": [
+      "GET circuit:{tool_name}"
+    ],
+    "api_calls": [],
+    "deployment_type": "Container (Kubernetes)",
+    "replicas": 2,
+    "inbound_protocol": "HTTP/REST",
+    "outbound_protocol": "HTTP/REST",
+    "container_image": "acr.azurecr.io/tool-selector:v1.0",
+    "prompts": {
+      "openapi_system_prompt": "You are an API discovery assistant for an enterprise banking platform. Analyze user queries and identify which APIs from the OpenAPI registry are needed. Return a JSON array of operation IDs ordered by dependency.",
+      "openapi_user_prompt_template": "User Query: \"{query}\"\\n\\nContext:\\n{context}\\n\\nAvailable OpenAPI Specs:\\n{specs}\\n\\nIdentify which API operations are needed.",
+      "openapi_example_response": "[\"accounts_api_get_balance\", \"customer_api_get_profile\"]"
+    }
+  },
+  "executor": {
+    "databases": [
+      "MongoDB",
+      "Cosmos DB"
+    ],
+    "functions": [
+      "_executor_node(state) - Executes agents and tools"
+    ],
+    "mongodb_ops": [
+      "tool_executions.insertOne({execution_id, tool_id, input, output, duration_ms})"
+    ],
+    "cosmos_ops": [
+      "SELECT * FROM c WHERE c.user_id = '{user_id}'"
+    ],
+    "api_calls": [],
+    "deployment_type": "Container (Kubernetes)",
+    "replicas": 3,
+    "inbound_protocol": "HTTP/REST",
+    "outbound_protocol": "gRPC",
+    "container_image": "acr.azurecr.io/executor:v1.0",
+    "prompts": {
+      "openapi_system_prompt": "You are a parameter extraction assistant for API calls. Extract required parameters from user queries and context to populate API requests. Validate parameter formats against OpenAPI schemas. Return JSON with all required parameters.",
+      "openapi_user_prompt_template": "API Operation: {operation}\\nOpenAPI Spec:\\n{spec}\\n\\nUser Query: \"{query}\"\\n\\nContext:\\n{context}\\n\\nExtract all required parameters.",
+      "openapi_example_response": "{account_id: \"ACC0000123456\", missing_params: false}"
+    }
+  },
+  "critic": {
+    "databases": [
+      "MongoDB",
+      "Azure AI Search"
+    ],
+    "functions": [
+      "_critic_node(state) - Validates response quality"
+    ],
+    "mongodb_ops": [
+      "audit_logs.insertOne({validation_details, confidence_score})"
+    ],
+    "api_calls": [
+      "POST /indexes/knowledge-base/docs/search",
+      "POST /openai/deployments/gpt-4/chat/completions"
+    ],
+    "deployment_type": "Container (Kubernetes)",
+    "replicas": 2,
+    "inbound_protocol": "HTTP/REST",
+    "outbound_protocol": "HTTP/REST",
+    "container_image": "acr.azurecr.io/critic-agent:v1.0"
+  },
+  "card_agent": {
+    "databases": [
+      "MongoDB",
+      "Cosmos DB",
+      "Azure AI Search"
+    ],
+    "functions": [
+      "execute(query, state) - Processes card-related requests"
+    ],
+    "mongodb_ops": [
+      "tool_executions.insertOne({...})",
+      "applications.insertOne({application_id, user_id, product_id, case_id})"
+    ],
+    "cosmos_ops": [
+      "SELECT * FROM c WHERE c.user_id = '{user_id}'"
+    ],
+    "api_calls": [
+      "GET https://salesforce.com/services/data/v58.0/query",
+      "POST https://salesforce.com/services/data/v58.0/sobjects/Case",
+      "POST /indexes/card-products/docs/search",
+      "POST /openai/deployments/gpt-4/chat/completions"
+    ],
+    "deployment_type": "Container (Kubernetes)",
+    "replicas": 3,
+    "inbound_protocol": "gRPC",
+    "outbound_protocol": "HTTPS/REST, gRPC",
+    "container_image": "acr.azurecr.io/card-agent:v1.0",
+    "agent_coordination": "Redis Pub/Sub for multi-agent scenarios"
+  },
+  "memory_manager": {
+    "databases": [
+      "MongoDB",
+      "Redis"
+    ],
+    "functions": [
+      "store_episode() - Stores episodic memory",
+      "retrieve_episodes() - Retrieves recent episodes",
+      "store_semantic_memory() - Stores semantic memory with embedding",
+      "search_semantic_memory() - Searches using vector similarity"
+    ],
+    "mongodb_ops": [
+      "memory_episodes.insertOne({episode_id, user_id, content, expires_at})",
+      "memory_episodes.find({user_id, importance_score: {$gte: min}}).sort({timestamp: -1})",
+      "memory_semantic.insertOne({memory_id, user_id, content, embedding})",
+      "memory_semantic.aggregate([cosine_similarity_search])"
+    ],
+    "redis_ops": [
+      "HSET memory:{user_id}:{memory_id} content '{content}'",
+      "EXPIRE memory:{user_id}:{memory_id} 3600"
+    ],
+    "api_calls": [],
+    "deployment_type": "Container (Kubernetes)",
+    "replicas": 2,
+    "inbound_protocol": "HTTP/REST",
+    "outbound_protocol": "HTTP/REST",
+    "container_image": "acr.azurecr.io/memory-manager:v1.0"
+  },
+  "rag_engine": {
+    "databases": [
+      "Azure AI Search"
+    ],
+    "functions": [
+      "encode_query(query) - Generates embedding",
+      "hybrid_search() - Performs hybrid vector+keyword search"
+    ],
+    "mongodb_ops": [],
+    "api_calls": [
+      "POST https://{search}.search.windows.net/indexes/knowledge-base/docs/search"
+    ],
+    "deployment_type": "Container (Kubernetes)",
+    "replicas": 2,
+    "inbound_protocol": "HTTP/REST",
+    "outbound_protocol": "HTTPS/REST",
+    "container_image": "acr.azurecr.io/rag-engine:v1.0"
+  },
+  "governance": {
+    "databases": [
+      "MongoDB",
+      "Cosmos DB"
+    ],
+    "functions": [
+      "track_token_usage() - Tracks LLM usage and costs",
+      "get_user_usage() - Gets usage statistics",
+      "log_event() - Logs audit event"
+    ],
+    "mongodb_ops": [
+      "token_usage.insertOne({user_id, model, tokens, cost_usd})",
+      "token_usage.aggregate([{$group: {total_cost: {$sum: '$cost_usd'}}}])"
+    ],
+    "cosmos_ops": [
+      "audit_events.create_item({event_id, component, action, input, output, hash})"
+    ],
+    "api_calls": [],
+    "deployment_type": "Container (Kubernetes)",
+    "replicas": 2,
+    "inbound_protocol": "HTTP/REST",
+    "outbound_protocol": "HTTP/REST",
+    "container_image": "acr.azurecr.io/governance:v1.0"
+  },
+  "mcp_tools": {
+    "databases": [
+      "MongoDB"
+    ],
+    "functions": [
+      "register_tool(tool) - Registers new MCP tool",
+      "get_tool(tool_id) - Retrieves tool definition",
+      "execute_tool() - Executes MCP tool with validation"
+    ],
+    "mongodb_ops": [
+      "mcp_tools.insertOne({tool_id, tool_name, schema, configuration})",
+      "mcp_tools.findOne({tool_id: tool_id})",
+      "tool_executions.insertOne({execution_id, tool_id, status, duration_ms})"
+    ],
+    "redis_ops": [
+      "GET circuit:{service_name}"
+    ],
+    "api_calls": [],
+    "deployment_type": "Container (Kubernetes)",
+    "replicas": 2,
+    "inbound_protocol": "HTTP/REST",
+    "outbound_protocol": "HTTPS/REST",
+    "container_image": "acr.azurecr.io/mcp-tools:v1.0"
+  },
+  "crm_tools": {
+    "databases": [
+      "MongoDB"
+    ],
+    "functions": [
+      "create_case() - Creates Salesforce case",
+      "search_contact() - Searches for contact by email",
+      "create_incident() - Creates ServiceNow incident"
+    ],
+    "mongodb_ops": [
+      "tool_executions.insertOne({...})"
+    ],
+    "api_calls": [
+      "POST https://{instance}/services/data/v58.0/sobjects/Case",
+      "GET https://{instance}/services/data/v58.0/query",
+      "POST https://{instance}/api/now/table/incident"
+    ],
+    "deployment_type": "Container (Kubernetes)",
+    "replicas": 2,
+    "inbound_protocol": "HTTP/REST",
+    "outbound_protocol": "HTTPS/REST",
+    "container_image": "acr.azurecr.io/crm-tools:v1.0"
+  },
+  "accounts_api": {
+    "databases": [],
+    "functions": [
+      "get_balance(account_id) - Retrieves account balance",
+      "get_transactions(account_id, start_date, end_date) - Gets transaction history",
+      "get_account_details(account_id) - Returns account information"
+    ],
+    "api_calls": [],
+    "deployment_type": "External API (Core Banking)",
+    "inbound_protocol": "HTTPS/REST",
+    "outbound_protocol": "-",
+    "authentication": "OAuth 2.0",
+    "endpoints": [
+      "GET /api/v1/accounts/{account_id}/balance",
+      "GET /api/v1/accounts/{account_id}/transactions",
+      "GET /api/v1/accounts/{account_id}/details"
+    ]
+  },
+  "cards_api": {
+    "databases": [],
+    "functions": [
+      "get_card_details(card_id) - Retrieves card information",
+      "get_card_balance(card_id) - Gets current balance and available credit",
+      "create_card_application(application_data) - Submits new card application",
+      "get_rewards(card_id) - Returns rewards points and status"
+    ],
+    "api_calls": [],
+    "deployment_type": "External API (Card Management)",
+    "inbound_protocol": "HTTPS/REST",
+    "outbound_protocol": "-",
+    "authentication": "OAuth 2.0",
+    "endpoints": [
+      "GET /api/v1/cards/{card_id}",
+      "GET /api/v1/cards/{card_id}/balance",
+      "POST /api/v1/cards/applications",
+      "GET /api/v1/cards/{card_id}/rewards"
+    ]
+  },
+  "loans_api": {
+    "databases": [],
+    "functions": [
+      "check_eligibility(customer_id, loan_type) - Checks loan eligibility",
+      "get_loan_products() - Returns available loan products",
+      "create_loan_application(application_data) - Submits loan application",
+      "get_loan_details(loan_id) - Retrieves loan account information"
+    ],
+    "api_calls": [],
+    "deployment_type": "External API (Loan Origination)",
+    "inbound_protocol": "HTTPS/REST",
+    "outbound_protocol": "-",
+    "authentication": "OAuth 2.0",
+    "endpoints": [
+      "POST /api/v1/loans/eligibility",
+      "GET /api/v1/loans/products",
+      "POST /api/v1/loans/applications",
+      "GET /api/v1/loans/{loan_id}"
+    ]
+  },
+  "kafka": {
+    "deployment": "Container (Docker/K8s)",
+    "deployment_badge": "\u2601\ufe0f",
+    "protocols": {
+      "inbound": "Kafka Protocol (binary) on port 9092/9093",
+      "outbound": "Zookeeper Protocol to port 2181"
+    },
+    "database_operations": [
+      "Internal: Log segments stored in /var/lib/kafka/data",
+      "Topics: db.changes.users, db.changes.conversations, agent.executions, compliance.alerts, external.crm.events, external.market.data"
+    ],
+    "functions": [
+      "receive_message() - Receives messages from producers",
+      "store_message() - Stores messages in topic partitions",
+      "deliver_message() - Delivers messages to consumers",
+      "replicate_partition() - Replicates data across brokers (if clustered)"
+    ],
+    "api_calls": [
+      "Zookeeper: GET /brokers/ids for broker discovery",
+      "Zookeeper: POST /controller for leader election"
+    ]
+  },
+  "zookeeper": {
+    "deployment": "Container (Docker/K8s)",
+    "deployment_badge": "\u2601\ufe0f",
+    "protocols": {
+      "inbound": "Zookeeper Protocol on port 2181",
+      "outbound": "None (coordination service)"
+    },
+    "database_operations": [
+      "Internal: Stores coordination data in /var/lib/zookeeper/data",
+      "Maintains: Broker metadata, topic configurations, consumer group offsets"
+    ],
+    "functions": [
+      "elect_leader() - Elects Kafka controller",
+      "store_metadata() - Stores cluster metadata",
+      "watch_changes() - Notifies Kafka of configuration changes"
+    ],
+    "api_calls": []
+  },
+  "kafka_connect": {
+    "deployment": "Container (Docker/K8s)",
+    "deployment_badge": "\u2601\ufe0f",
+    "protocols": {
+      "inbound": "HTTP REST API on port 8083",
+      "outbound": "Kafka Protocol to port 9092, MongoDB Wire Protocol to port 27017"
+    },
+    "database_operations": [
+      "MongoDB: db.watch() - Watches change streams",
+      "PostgreSQL: SELECT * FROM pg_logical_slot_get_changes() - Reads WAL",
+      "Kafka: producer.send() - Publishes CDC events to topics"
+    ],
+    "functions": [
+      "capture_change() - Captures database changes via CDC",
+      "transform_event() - Transforms DB events to Kafka format",
+      "publish_event() - Publishes to Kafka topics"
+    ],
+    "api_calls": [
+      "Kafka: POST /topics/{topic} to publish CDC events",
+      "MongoDB: GET /?watch=true for change streams",
+      "PostgreSQL: SELECT * FROM pg_replication_slots"
+    ]
+  },
+  "analytics_service": {
+    "deployment": "Container (Kubernetes)",
+    "deployment_badge": "\u2b50",
+    "protocols": {
+      "inbound": "HTTP REST API on port 8080",
+      "outbound": "Kafka Consumer Protocol to port 9092"
+    },
+    "database_operations": [
+      "Kafka: consumer.poll() - Consumes from agent.executions topic",
+      "Redis: HINCRBY analytics:metrics:{agent_id} count 1",
+      "Redis: ZADD analytics:latency {timestamp} {latency_ms}",
+      "MongoDB: analytics.insertOne({metric_data})"
+    ],
+    "functions": [
+      "consume_agent_events() - Consumes agent execution events from Kafka",
+      "calculate_metrics() - Calculates performance metrics",
+      "generate_trends() - Generates trend analysis",
+      "store_analytics() - Stores analytics data"
+    ],
+    "api_calls": [
+      "Kafka: GET /topics/agent.executions/messages",
+      "Prometheus: POST /api/v1/write for metrics export"
+    ]
+  },
+  "audit_service": {
+    "deployment": "Container (Kubernetes)",
+    "deployment_badge": "\u2b50",
+    "protocols": {
+      "inbound": "HTTP REST API on port 8080",
+      "outbound": "Kafka Consumer Protocol to port 9092"
+    },
+    "database_operations": [
+      "Kafka: consumer.subscribe(['db.changes.*', 'agent.*', 'compliance.*'])",
+      "Cosmos DB: audit_trail.insertOne({event_id, timestamp, event_type, data, hash})",
+      "PostgreSQL: INSERT INTO audit_events (event_id, component, action, input_hash, output_hash)"
+    ],
+    "functions": [
+      "consume_all_events() - Consumes all Kafka topics",
+      "hash_event() - Creates immutable hash of event",
+      "store_audit_trail() - Stores in audit database",
+      "verify_integrity() - Verifies audit trail integrity"
+    ],
+    "api_calls": [
+      "Kafka: GET /topics/+/messages (all topics)",
+      "SIEM: POST /api/v1/events for security monitoring"
+    ]
+  },
+  "openapi_registry": {
+    "deployment": "Container (Kubernetes)",
+    "deployment_badge": "\u2b50",
+    "deployment_type": "Container (Kubernetes)",
+    "protocols": {
+      "inbound": "HTTP REST API on port 8080",
+      "outbound": "Vector DB query protocol, File system for spec storage"
+    },
+    "database_operations": [
+      "Vector DB: INSERT INTO openapi_specs_embeddings (spec_id, operation_id, embedding)",
+      "Vector DB: SELECT * FROM openapi_specs_embeddings WHERE embedding <-> query_embedding < 0.3",
+      "File System: READ /specs/{api_name}/openapi.yaml",
+      "Redis: HSET openapi:cache:{spec_id} spec '{json_spec}' EX 3600"
+    ],
+    "functions": [
+      "load_spec(api_name) - Loads OpenAPI spec from file system",
+      "search_operations(query, top_k=5) - Semantic search for matching operations",
+      "get_operation(operation_id) - Retrieves specific operation details",
+      "validate_spec(spec) - Validates OpenAPI spec format",
+      "embed_operations(spec) - Creates vector embeddings for all operations"
+    ],
+    "api_calls": [
+      "Vector DB: POST /query with embedding vector",
+      "Azure OpenAI: POST /embeddings to create operation embeddings"
+    ],
+    "prompts": {
+      "system_prompt": "You are an OpenAPI schema provider. Given an operation ID, return the complete OpenAPI specification including HTTP method, endpoint, parameters, request/response schemas, and authentication requirements. Return in OpenAPI 3.0 format.",
+      "user_prompt_template": "Operation ID: {operation_id}\\n\\nReturn the complete OpenAPI specification for this operation.",
+      "example_response": "Returns complete OpenAPI spec with paths, parameters, schemas, security"
+    }
+  },
+  "openapi_client": {
+    "deployment": "Container (Kubernetes)",
+    "deployment_badge": "\u2b50",
+    "deployment_type": "Container (Kubernetes)",
+    "protocols": {
+      "inbound": "gRPC on port 50051",
+      "outbound": "Dynamic HTTP/HTTPS based on OpenAPI spec"
+    },
+    "database_operations": [
+      "Redis: GET openapi:client:{spec_id} - Cache generated clients",
+      "Redis: SETEX openapi:client:{spec_id} 3600 '{client_code}'"
+    ],
+    "functions": [
+      "generate_client(spec) - Dynamically generates API client from spec",
+      "call_operation(operation_id, params) - Calls API operation",
+      "serialize_request(operation_id, params) - Serializes request based on schema",
+      "deserialize_response(operation_id, response) - Deserializes response",
+      "handle_auth(spec, credentials) - Handles authentication per spec"
+    ],
+    "api_calls": [
+      "Dynamic: {method} {base_url}{path} based on OpenAPI spec",
+      "Example: GET https://api.example.com/accounts/{id}/balance",
+      "Auth: OAuth 2.0, API Key, or Bearer token per spec"
+    ],
+    "prompts": {
+      "system_prompt": "You are a dynamic API client generator. Given an OpenAPI specification and parameters, generate Python code to make the API call using the requests library. Include proper error handling, authentication headers, and response parsing.",
+      "user_prompt_template": "OpenAPI Spec:\\n{spec}\\n\\nParameters:\\n{params}\\n\\nOAuth Token: {token}\\n\\nGenerate Python code to make this API call.",
+      "example_response": "Returns executable Python code with requests.get/post/put/delete"
+    }
+  },
+  "schema_validator": {
+    "deployment": "Container (Kubernetes)",
+    "deployment_badge": "\u2b50",
+    "deployment_type": "Container (Kubernetes)",
+    "protocols": {
+      "inbound": "gRPC on port 50052",
+      "outbound": "None (validation service)"
+    },
+    "database_operations": [
+      "Redis: GET schema:cache:{operation_id} - Cache compiled schemas",
+      "Redis: SETEX schema:cache:{operation_id} 3600 '{compiled_schema}'"
+    ],
+    "functions": [
+      "validate_parameters(operation_id, params) - Validates request parameters",
+      "validate_response(operation_id, response) - Validates response data",
+      "get_schema(operation_id) - Retrieves schema for operation",
+      "compile_schema(schema) - Compiles JSON schema for fast validation",
+      "format_errors(validation_result) - Formats validation errors"
+    ],
+    "api_calls": [],
+    "prompts": {
+      "system_prompt": "You are an API response validator. Compare actual API responses with OpenAPI schemas and identify discrepancies. Validate data types, formats, required fields, and enum values. Return a validation report with errors and warnings.",
+      "user_prompt_template": "OpenAPI Response Schema:\\n{schema}\\n\\nActual API Response:\\n{response}\\n\\nValidate this response against the schema.",
+      "example_response": "Returns {valid: true/false, errors: [...], warnings: [...]}"
+    }
+  }
+}
